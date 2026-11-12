@@ -180,3 +180,137 @@ Content-Type: text/plain; charset="UTF-8"
     for event in events:
         result += encoder.send_event(event)
     assert data == result
+
+
+def _decode_field_data(boundary: bytes, body: bytes, chunk_size: int | None) -> bytes:
+    """Drive a decoder over ``body`` and collect the first part's data."""
+    decoder = MultipartDecoder(boundary)
+    chunks = [body] if chunk_size is None else [body[i : i + chunk_size] for i in range(0, len(body), chunk_size)]
+    data = bytearray()
+    ci, fed_end = 0, False
+
+    while True:
+        event = decoder.next_event()
+
+        if isinstance(event, NeedData):
+            if ci < len(chunks):
+                decoder.receive_data(chunks[ci])
+                ci += 1
+            elif not fed_end:
+                decoder.receive_data(None)
+                fed_end = True
+            else:
+                break
+
+            continue
+
+        if isinstance(event, Data):
+            data.extend(event.data)
+
+        if isinstance(event, Epilogue):
+            break
+
+    return bytes(data)
+
+
+def _field_body(field_data: bytes) -> bytes:
+    return (
+        b'--WZBOUND\r\nContent-Disposition: form-data; name="a"\r\n\r\n'
+        + field_data
+        + b"\r\n--WZBOUND--\r\n"
+    )
+
+
+def test_decoder_stray_byte_near_closing_boundary() -> None:
+    """A closing boundary split across chunks must not leak a ``\r`` into
+    the field data.
+
+    Regression test for https://github.com/pallets/werkzeug/issues/3285:
+    when the buffer ends one dash short of the closing boundary
+    (``\r\n--WZBOUND-``), the ``\r`` that starts the delimiter was
+    released as data, because ``_last_partial_boundary_index`` only
+    looked back one complete ``\r\n--boundary`` without the closing
+    ``--``. An empty field decoded as ``b"\r"`` instead of ``b""``
+    when delivered one byte at a time.
+    """
+    body = _field_body(b"")
+    assert _decode_field_data(b"WZBOUND", body, None) == b""
+    assert _decode_field_data(b"WZBOUND", body, 1) == b""
+
+    # The same split must not corrupt non-empty data, and every
+    # two-chunk split point must decode identically.
+    body = _field_body(b"hello")
+
+    assert _decode_field_data(b"WZBOUND", body, 1) == b"hello"
+
+    for split in range(len(body) + 1):
+        chunks_body = [body[:split], body[split:]]
+        decoder = MultipartDecoder(b"WZBOUND")
+        data = bytearray()
+        ci, fed_end = 0, False
+
+        while True:
+            event = decoder.next_event()
+
+            if isinstance(event, NeedData):
+                if ci < len(chunks_body):
+                    decoder.receive_data(chunks_body[ci])
+                    ci += 1
+                elif not fed_end:
+                    decoder.receive_data(None)
+                    fed_end = True
+                else:
+                    break
+
+                continue
+
+            if isinstance(event, Data):
+                data.extend(event.data)
+
+            if isinstance(event, Epilogue):
+                break
+
+        assert bytes(data) == b"hello", f"split at {split} gave {bytes(data)!r}"
+
+
+def test_decoder_trailing_cr_data_is_preserved() -> None:
+    """A field whose data genuinely ends with ``\r`` keeps it.
+
+    The fix for #3285 only widens the look-back window in
+    ``_last_partial_boundary_index`` to cover the closing ``--``; a
+    ``\r`` that is part of the field data is still emitted once the
+    boundary arrives, not swallowed with the delimiter.
+    """
+    body = _field_body(b"abc\r")
+    assert _decode_field_data(b"WZBOUND", body, None) == b"abc\r"
+    assert _decode_field_data(b"WZBOUND", body, 1) == b"abc\r"
+
+    for split in range(len(body) + 1):
+        decoder = MultipartDecoder(b"WZBOUND")
+        data = bytearray()
+        chunks_body = [body[:split], body[split:]]
+        ci, fed_end = 0, False
+
+        while True:
+            event = decoder.next_event()
+
+            if isinstance(event, NeedData):
+                if ci < len(chunks_body):
+                    decoder.receive_data(chunks_body[ci])
+                    ci += 1
+                elif not fed_end:
+                    decoder.receive_data(None)
+                    fed_end = True
+                else:
+                    break
+
+                continue
+
+            if isinstance(event, Data):
+                data.extend(event.data)
+
+            if isinstance(event, Epilogue):
+                break
+
+        assert bytes(data) == b"abc\r", f"split at {split} gave {bytes(data)!r}"
+        
