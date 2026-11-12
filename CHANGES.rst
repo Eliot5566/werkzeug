@@ -3,6 +3,8 @@
 Version 3.2.0
 -------------
 
+-   Fix ``MultipartDecoder`` appending a stray ``\r`` to field data when
+    the closing boundary is split across chunks. :issue:`3285`
 -   Drop support for Python 3.9 and 3.10. :pr:`3098`
 -   Remove previous deprecated code: :pr:`3099`
 
