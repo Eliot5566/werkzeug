@@ -274,7 +274,15 @@ class MultipartDecoder:
         # position of a LF or a CR, unless that position is more
         # than a complete boundary from the end in which case there
         # is no partial boundary.
-        complete_boundary_index = len(data) - len(b"\r\n--" + self.boundary)
+        #
+        # A complete boundary is measured with its closing ``--``:
+        # the delimiter that can still be arriving is
+        # ``\r\n--boundary--`` (or ``\r\n--boundary`` plus a line
+        # break). Measuring without the closing ``--`` leaves the
+        # window one byte short, so when the buffer ends one dash
+        # short of the closing boundary the CR that starts the
+        # delimiter is treated as data and released (#3285).
+        complete_boundary_index = len(data) - len(b"\r\n--" + self.boundary + b"--")
         try:
             last_nl = data.rindex(b"\n")
         except ValueError:
